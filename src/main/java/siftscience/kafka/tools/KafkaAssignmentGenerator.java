@@ -1,6 +1,7 @@
 package siftscience.kafka.tools;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -82,6 +83,10 @@ public class KafkaAssignmentGenerator {
     @Option(name = "--disable_rack_awareness",
             usage = "set to true to ignore rack configurations")
     private boolean disableRackAwareness = false;
+    
+    @Option(name = "--security-protocol",
+            usage = "name of the security protocol")
+    private SecurityProtocol security_protocol = null;
 
     private enum Mode {
         /**
@@ -110,11 +115,11 @@ public class KafkaAssignmentGenerator {
                         topics)));
     }
 
-    private static void printCurrentBrokers(ZkUtils zkUtils) throws JSONException {
+    private static void printCurrentBrokers(ZkUtils zkUtils, SecurityProtocol security_protocol) throws JSONException {
         List<Broker> brokers = JavaConversions.seqAsJavaList(zkUtils.getAllBrokersInCluster());
         JSONArray json = new JSONArray();
         for (Broker broker : brokers) {
-            BrokerEndPoint endpoint = broker.getBrokerEndPoint(SecurityProtocol.PLAINTEXT);
+            BrokerEndPoint endpoint = broker.getBrokerEndPoint(security_protocol);
             JSONObject brokerJson = new JSONObject();
             brokerJson.put("id", broker.id());
             brokerJson.put("host", endpoint.host());
@@ -139,7 +144,6 @@ public class KafkaAssignmentGenerator {
             brokerSet = Sets.newHashSet(Lists.transform(
                     JavaConversions.seqAsJavaList(zkUtils.getAllBrokersInCluster()),
                     new Function<Broker, Integer>() {
-                        @Override
                         public Integer apply(Broker broker) {
                             return broker.id();
                         }
@@ -166,7 +170,7 @@ public class KafkaAssignmentGenerator {
         // Assign topics one at a time. This is slightly suboptimal from a packing standpoint, but
         // it's close enough to work in practice. We can also always follow it up with a Kafka
         // leader election rebalance if necessary.
-        JSONObject json = new JSONObject();
+        JSONObject json = new JSONObject(new LinkedHashMap());
         json.put("version", KAFKA_FORMAT_VERSION);
         JSONArray partitionsJson = new JSONArray();
         KafkaTopicAssigner assigner = new KafkaTopicAssigner();
@@ -175,7 +179,7 @@ public class KafkaAssignmentGenerator {
             Map<Integer, List<Integer>> finalAssignment = assigner.generateAssignment(
                     topic, partitionAssignment, brokers, rackAssignment, desiredReplicationFactor);
             for (Map.Entry<Integer, List<Integer>> e : finalAssignment.entrySet()) {
-                JSONObject partitionJson = new JSONObject();
+                JSONObject partitionJson = new JSONObject(new LinkedHashMap());
                 partitionJson.put("topic", topic);
                 partitionJson.put("partition", e.getKey());
                 partitionJson.put("replicas", new JSONArray(e.getValue()));
@@ -187,12 +191,13 @@ public class KafkaAssignmentGenerator {
     }
 
     private static Set<Integer> brokerHostnamesToBrokerIds(
-            ZkUtils zkUtils, Set<String> brokerHostnameSet, boolean checkPresence) {
+            ZkUtils zkUtils, Set<String> brokerHostnameSet, boolean checkPresence, SecurityProtocol security_protocol) {
         List<Broker> brokers = JavaConversions.seqAsJavaList(zkUtils.getAllBrokersInCluster());
         Set<Integer> brokerIdSet = Sets.newHashSet();
         for (Broker broker : brokers) {
-            BrokerEndPoint endpoint = broker.getBrokerEndPoint(SecurityProtocol.PLAINTEXT);
-            if (brokerHostnameSet.contains(endpoint.host())) {
+        	//System.out.println("Find "+broker.toString());
+            BrokerEndPoint endpoint = broker.getBrokerEndPoint(security_protocol);
+            if (brokerHostnameSet.contains(endpoint.host()) || brokerHostnameSet.contains(endpoint.host() + ":" + endpoint.port())) {
                 brokerIdSet.add(broker.id());
             }
         }
@@ -203,12 +208,11 @@ public class KafkaAssignmentGenerator {
         return brokerIdSet;
     }
 
-    private Set<Integer> getBrokerIds(ZkUtils zkUtils) {
+    private Set<Integer> getBrokerIds(ZkUtils zkUtils, SecurityProtocol security_protocol) {
         Set<Integer> brokerIdSet = Collections.emptySet();
         if (StringUtils.isNotEmpty(brokerIds)) {
             brokerIdSet = ImmutableSet.copyOf(Iterables.transform(SPLITTER
                     .split(brokerIds), new Function<String, Integer>() {
-                @Override
                 public Integer apply(String brokerId) {
                     try {
                         return Integer.parseInt(brokerId);
@@ -219,7 +223,7 @@ public class KafkaAssignmentGenerator {
             }));
         } else if (StringUtils.isNotEmpty(brokerHostnames)) {
             Set<String> brokerHostnameSet = ImmutableSet.copyOf(SPLITTER.split(brokerHostnames));
-            brokerIdSet = brokerHostnamesToBrokerIds(zkUtils, brokerHostnameSet, true);
+            brokerIdSet = brokerHostnamesToBrokerIds(zkUtils, brokerHostnameSet, true, security_protocol);
         }
         return brokerIdSet;
     }
@@ -229,7 +233,7 @@ public class KafkaAssignmentGenerator {
             Set<String> brokerHostnamesToReplaceSet = ImmutableSet.copyOf(
                     SPLITTER.split(brokerHostnamesToReplace));
             return ImmutableSet.copyOf(
-                    brokerHostnamesToBrokerIds(zkUtils, brokerHostnamesToReplaceSet, false));
+                    brokerHostnamesToBrokerIds(zkUtils, brokerHostnamesToReplaceSet, false, security_protocol));
 
         }
         return Collections.emptySet();
@@ -274,9 +278,10 @@ public class KafkaAssignmentGenerator {
                 ZKStringSerializer$.MODULE$);
         zkClient.waitUntilConnected();
         ZkUtils zkUtils = ZkUtils.apply(zkClient, false);
+        security_protocol = security_protocol == null?SecurityProtocol.PLAINTEXT:security_protocol; 
 
         try {
-            Set<Integer> brokerIdSet = getBrokerIds(zkUtils);
+            Set<Integer> brokerIdSet = getBrokerIds(zkUtils, security_protocol);
             Set<Integer> excludedBrokerIdSet = getExcludedBrokerIds(zkUtils);
             Map<Integer, String> rackAssignment = getRackAssignment(zkUtils);
             switch (mode) {
@@ -284,7 +289,7 @@ public class KafkaAssignmentGenerator {
                     printCurrentAssignment(zkUtils, topics);
                     break;
                 case PRINT_CURRENT_BROKERS:
-                    printCurrentBrokers(zkUtils);
+                    printCurrentBrokers(zkUtils, security_protocol);
                     break;
                 case PRINT_REASSIGNMENT:
                     printLeastDisruptiveReassignment(zkUtils, topics, brokerIdSet,
